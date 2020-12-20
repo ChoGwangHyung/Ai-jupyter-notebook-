@@ -1,0 +1,156 @@
+# tensorflow 
+import tensorflow as tf
+#import tensorflow.compat.v1 as tf
+# keras 
+from keras.models import Sequential
+from keras.layers import Dense
+from keras.callbacks import EarlyStopping, ModelCheckpoint
+from keras.layers import LSTM
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+
+import pandas as pd
+import pandas_datareader as pdr
+import datetime
+from datetime import datetime
+
+# 종목 타입에 따라 download url이 다름. 종목코드 뒤에 .KS .KQ등이 입력되어야해서 Download Link 구분 필요
+stock_type = {
+'kospi': 'stockMkt',
+'kosdaq': 'kosdaqMkt'
+}
+
+# 회사명으로 주식 종목 코드를 획득할 수 있도록 하는 함수
+def get_code(df, name):
+    code = df.query("name=='{}'".format(name))['code'].to_string(index=False)
+
+    # 위와같이 code명을 가져오면 앞에 공백이 붙어있는 상황이 발생하여 앞뒤로 sript() 하여 공백 제거
+    code = code.strip()
+    return code
+
+# download url 조합
+def get_stock_code(market_type=None):
+    market_type_param = stock_type[market_type]
+    download_link = 'http://kind.krx.co.kr/corpgeneral/corpList.do'
+    download_link = download_link + '?method=download'
+    download_link = download_link + '&marketType=' + market_type_param
+    df = pd.read_html(download_link, header=0)[0]
+    return df;
+
+# kospi 종목코드 목록 다운로드
+def get_stock_code_kospi():
+    df = get_stock_code('kospi')
+    df.종목코드 = df.종목코드.map('{:06d}.KS'.format)
+    return df
+
+# kosdaq 종목코드 목록 다운로드
+def get_stock_code_kosdaq():
+    df = get_stock_code('kosdaq')
+    df.종목코드 = df.종목코드.map('{:06d}.KQ'.format)
+    return df 
+            
+# kospi, kosdaq 종목코드 각각 다운로드
+kospi_df = get_stock_code_kospi()
+kosdaq_df = get_stock_code_kosdaq()
+
+# data frame merge
+code_df = pd.concat([kospi_df, kosdaq_df])
+
+# data frame정리
+code_df = code_df[['회사명', '종목코드']]
+
+# data frame title 변경 '회사명' = name, 종목코드 = 'code'
+code_df = code_df.rename(columns={'회사명': 'name', '종목코드': 'code'})
+code = get_code(code_df, '삼성전자')
+start = datetime(2010,6,1)
+end = datetime(2020,12,17)
+data = pdr.get_data_yahoo(code, start, end)
+
+############ DATA 관련##########
+
+#정규화
+from sklearn.preprocessing import MinMaxScaler
+
+#train
+scaler = MinMaxScaler()
+scale_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+data = scaler.fit_transform(data[scale_cols])
+
+data = pd.DataFrame(data)
+data.columns = scale_cols
+
+print(data)
+
+#TEST_SIZE는 몇 일 이전의 데이터
+TEST_SIZE = 100
+
+train = data[:-TEST_SIZE]
+test = data[-TEST_SIZE:]
+
+#window_size는 과거 몇일 기준으로 그 다음날의 데이터를 예측할 것인지
+def make_dataset(data, label, window_size=20):
+    feature_list = []
+    label_list = []
+    for i in range(len(data) - window_size):
+        feature_list.append(np.array(data.iloc[i:i+window_size]))
+        label_list.append(np.array(label.iloc[i+window_size]))
+    return np.array(feature_list), np.array(label_list)
+
+feature_cols = ['Open', 'High', 'Low', 'Volume']
+label_cols = ['Close']
+
+train_feature = train[feature_cols]
+train_label = train[label_cols]
+
+test_feature = test[feature_cols]
+test_label = test[label_cols]
+
+# train dataset
+train_feature, train_label = make_dataset(train_feature, train_label, 20)
+
+# train, validation set 생성
+from sklearn.model_selection import train_test_split
+x_train, x_valid, y_train, y_valid = train_test_split(train_feature, train_label, test_size=0.2)
+
+# test dataset (실제 예측 해볼 데이터)
+test_feature, test_label = make_dataset(test_feature, test_label, 20)
+
+# 모델 생성
+model = Sequential()
+model.add(LSTM(16, 
+               input_shape=(train_feature.shape[1], train_feature.shape[2]), 
+               activation='relu', 
+               return_sequences=False)
+          )
+model.add(Dense(1))
+
+# 모델 학습
+model.compile(loss='mean_squared_error', optimizer='adam')
+early_stop = EarlyStopping(monitor='val_loss', patience=20)
+model_path = ''
+filename = os.path.join(model_path, 'tmp_checkpoint.h5')
+checkpoint = ModelCheckpoint(filename, monitor='val_loss', verbose=0.5, save_best_only=True, mode='auto')
+
+history = model.fit(x_train, y_train, 
+                    epochs=200, 
+                    batch_size=16,
+                    validation_data=(x_valid, y_valid), 
+                    callbacks=[early_stop, checkpoint])
+
+
+# weight 로딩
+model.load_weights(filename)
+model.save_weights(filename)
+
+# 예측
+pred = model.predict(test_feature)
+
+plt.figure(figsize=(12, 9))
+plt.plot(test_label, label='actual')
+plt.plot(pred, label='prediction')
+plt.legend()
+plt.show()
+
+
+#출처: https://wendys.tistory.com/176?category=769564 [웬디의 기묘한 이야기]
